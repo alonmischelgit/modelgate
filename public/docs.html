@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>modelgate · API</title>
+<link rel="stylesheet" href="/swagger-ui/swagger-ui.css">
+<style>
+  :root{--bg:#0e1319;--bd:#25313d;--tx:#dbe5ef;--mu:#8ba0b5;--ac:#35b5b0}
+  body{margin:0;background:var(--bg);font:14px/1.5 system-ui,sans-serif}
+  header{padding:14px 22px;border-bottom:1px solid var(--bd);display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;color:var(--tx)}
+  header b{font-size:17px} header b span{color:var(--ac)}
+  header a{color:var(--ac);font-size:12.5px;text-decoration:none}
+  header .meta{color:var(--mu);font-size:12.5px}
+  #swagger{background:#f6f8fa}
+  #fallback{display:none;color:var(--tx);padding:22px;max-width:760px;line-height:1.7}
+  #fallback code{background:#161d26;border:1px solid var(--bd);border-radius:5px;padding:1px 6px}
+</style>
+</head>
+<body>
+<header>
+  <b>model<span>gate</span></b>
+  <span class="meta">API reference — every example below is runnable against this instance</span>
+  <a href="/">← dashboard</a>
+  <a href="/openapi.json">openapi.json</a>
+</header>
+
+<div id="swagger"></div>
+
+<div id="fallback">
+  <h2>Swagger UI could not load</h2>
+  <p>
+    The viewer is served from <code>node_modules/swagger-ui-dist</code> — run
+    <code>npm install</code> if it's missing. The spec itself is at
+    <a href="/openapi.json">/openapi.json</a> regardless.
+  </p>
+</div>
+
+<script src="/swagger-ui/swagger-ui-bundle.js"></script>
+<script>
+  if (!window.SwaggerUIBundle) {
+    document.getElementById("swagger").style.display = "none";
+    document.getElementById("fallback").style.display = "block";
+  } else {
+    SwaggerUIBundle({
+      url: "/openapi.json",
+      dom_id: "#swagger",
+      // Examples are the point of this page, so open everything by default and
+      // keep "Try it out" armed - no extra clicks between reading and running.
+      docExpansion: "list",
+      defaultModelsExpandDepth: 1,
+      tryItOutEnabled: true,
+      displayRequestDuration: true,
+      persistAuthorization: true,
+      syntaxHighlight: { theme: "nord" },
+    });
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+# Redis for local multi-instance correctness. Not required to run the gateway
+# (it falls back to in-memory state and says so) - required for the rate limit,
+# budget, cache and breaker to be shared across more than one gateway process.
+#
+#   docker compose up -d
+#   REDIS_URL=redis://localhost:6379 npm start
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # ephemeral: it's a cache
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5

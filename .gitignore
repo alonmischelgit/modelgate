@@ -1,0 +1,8 @@
+node_modules/
+data/
+*.log
+
+# secrets: every .env variant except the committed example
+.env
+.env.*
+!.env.example

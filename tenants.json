@@ -1,0 +1,19 @@
+{
+  "default": { "rateLimitPerMin": 60, "budgetUsdPerDay": 5 },
+  "tenants": {
+    "team-search": {
+      "rateLimitPerMin": 120,
+      "budgetUsdPerDay": 20,
+      "note": "product traffic - higher throughput and spend"
+    },
+    "eu-billing": {
+      "providers": ["anthropic", "mock-primary", "mock-secondary"],
+      "note": "EU data residency: never routed to Google"
+    },
+    "intern-sandbox": {
+      "rateLimitPerMin": 5,
+      "budgetUsdPerDay": 0.10,
+      "note": "learning account - tight limits, tiny budget"
+    }
+  }
+}

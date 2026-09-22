@@ -1,0 +1,31 @@
+{
+  "name": "modelgate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An LLM gateway: one endpoint in front of every model provider, adding model routing, tool-call passthrough, caching, rate limits, budgets, retries, circuit breaking, failover and cost attribution.",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "demo": "tsx src/demo.ts",
+    "agent": "tsx examples/agent.ts",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
+    "@google/genai": "^2.23.0",
+    "express": "^4.21.2",
+    "ioredis": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "swagger-ui-dist": "^5.33.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

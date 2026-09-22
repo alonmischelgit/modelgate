@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>modelgate</title>
+<style>
+  :root{--bg:#0e1319;--panel:#161d26;--bd:#25313d;--tx:#dbe5ef;--mu:#8ba0b5;--ac:#35b5b0;--ok:#4ade80;--warn:#fbbf24;--err:#f87171}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 system-ui,sans-serif}
+  header{padding:14px 22px;border-bottom:1px solid var(--bd);display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
+  header b{font-size:17px} header b span{color:var(--ac)}
+  header .meta{color:var(--mu);font-size:12.5px}
+  main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:18px 22px;max-width:1500px}
+  @media(max-width:1000px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--bd);border-radius:10px;padding:14px 16px}
+  h3{margin:0 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--mu)}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .kpi{background:#111821;border:1px solid var(--bd);border-radius:8px;padding:10px}
+  .kpi .v{font-size:21px;font-weight:700;font-variant-numeric:tabular-nums}
+  .kpi .l{color:var(--mu);font-size:11.5px}
+  select{background:#111821;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:8px 10px;font:inherit;max-width:260px}
+  label.meta{display:flex;gap:6px;align-items:center;color:var(--mu);font-size:12.5px;cursor:pointer}
+  textarea,input{width:100%;background:#111821;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:8px 10px;font:inherit}
+  textarea{min-height:70px;resize:vertical}
+  .row{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+  button{background:var(--ac);border:0;border-radius:7px;color:#04211f;font-weight:700;padding:8px 15px;cursor:pointer;font:inherit}
+  button.ghost{background:transparent;border:1px solid var(--bd);color:var(--tx);font-weight:600}
+  button:disabled{opacity:.5;cursor:default}
+  pre{background:#111821;border:1px solid var(--bd);border-radius:7px;padding:10px;overflow:auto;font-size:12px;margin:8px 0 0;max-height:280px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:5px 7px;border-bottom:1px solid var(--bd);font-variant-numeric:tabular-nums}
+  th{color:var(--mu);font-weight:600}
+  .pill{border-radius:99px;padding:1px 8px;font-size:11px;font-weight:700}
+  .hit{background:#10301c;color:var(--ok)} .miss{background:#2a2213;color:var(--warn)} .bad{background:#3c1414;color:var(--err)}
+  .t{color:var(--mu);font-family:ui-monospace,monospace;font-size:11.5px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+  <b>model<span>gate</span></b>
+  <span class="meta" id="meta">connecting…</span>
+  <a href="/docs" style="color:var(--ac);font-size:12.5px;text-decoration:none">API docs (Swagger) →</a>
+</header>
+
+<main>
+  <section class="card">
+    <h3>Send a request through the gateway</h3>
+    <textarea id="q">What is a circuit breaker?</textarea>
+    <div class="row">
+      <input id="tenant" value="tenant-a" style="max-width:150px" title="API key / tenant">
+      <select id="model" title="model (routed by the registry)"></select>
+      <label class="meta" title="Gemini 3.x reasons before answering; those tokens are billed as output">
+        <input type="checkbox" id="nothink"> thinking off
+      </label>
+      <button id="send">Send</button>
+      <button class="ghost" id="again">Send same again (cache)</button>
+    </div>
+    <div class="row">
+      <button class="ghost" id="chaos">Break primary provider</button>
+      <button class="ghost" id="heal">Heal provider</button>
+      <button class="ghost" id="burst">Burst 90 (rate limit)</button>
+    </div>
+    <pre id="out">Ready.</pre>
+  </section>
+
+  <section class="card">
+    <h3>Live stats</h3>
+    <div class="kpis">
+      <div class="kpi"><div class="v" id="k-req">0</div><div class="l">requests</div></div>
+      <div class="kpi"><div class="v" id="k-hit">0%</div><div class="l">cache hit rate</div></div>
+      <div class="kpi"><div class="v" id="k-spend">$0</div><div class="l">spend</div></div>
+      <div class="kpi"><div class="v" id="k-saved">$0</div><div class="l">saved by cache</div></div>
+      <div class="kpi"><div class="v" id="k-p50">0ms</div><div class="l">p50</div></div>
+      <div class="kpi"><div class="v" id="k-p95">0ms</div><div class="l">p95</div></div>
+      <div class="kpi"><div class="v" id="k-fail">0</div><div class="l">failures</div></div>
+      <div class="kpi"><div class="v" id="k-store">—</div><div class="l">state store</div></div>
+    </div>
+    <h3 style="margin-top:14px">Recent requests</h3>
+    <table><thead><tr><th>time</th><th>tenant</th><th>provider</th><th></th><th>tok</th><th>cost</th><th>ms</th></tr></thead>
+    <tbody id="rows"></tbody></table>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const api = (p, o) => fetch(p, o).then((r) => r.json());
+
+async function send(text, tenant) {
+  $("out").textContent = "…";
+  const t0 = performance.now();
+  const r = await fetch("/v1/chat", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": tenant },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: text }],
+      model: $("model").value || undefined,
+      ...($("nothink").checked ? { thinkingBudget: 0 } : {}),
+    }),
+  });
+  const b = await r.json();
+  const ms = Math.round(performance.now() - t0);
+  const served = b.servedBy ? `${b.servedBy.provider}/${b.servedBy.model}` : b.provider;
+  const head = r.status === 200
+    ? `${b.cached ? "CACHE HIT" : "MISS -> " + served}  ${ms}ms  cost $${b.costUsd}` +
+      (b.usage?.thinkingTokens ? `  (${b.usage.thinkingTokens} thinking tokens)` : "") +
+      (b.substituted ? "  (SUBSTITUTED)" : "") +
+      (b.failedOver ? "  (FAILED OVER)" : "") +
+      (b.breakerSkipped?.length ? `  (breaker skipped: ${b.breakerSkipped.join(",")})` : "")
+    : `HTTP ${r.status}  ${b.error}`;
+  $("out").textContent = head + "\n\n" + (b.trace || []).join("\n") +
+    (b.text ? "\n\n" + b.text : "");
+  refresh();
+}
+
+$("send").onclick  = () => send($("q").value, $("tenant").value);
+$("again").onclick = () => send($("q").value, $("tenant").value);
+$("chaos").onclick = async () => {
+  await api("/v1/_chaos", { method:"POST", headers:{"content-type":"application/json"},
+    body: JSON.stringify({ provider:"mock-primary", failing:true }) });
+  $("out").textContent = "Primary provider is now failing. Send a request to watch retries + failover.";
+};
+$("heal").onclick = async () => {
+  await api("/v1/_chaos", { method:"POST", headers:{"content-type":"application/json"},
+    body: JSON.stringify({ provider:"mock-primary", failing:false }) });
+  $("out").textContent = "Primary healed.";
+};
+$("burst").onclick = async () => {
+  $("out").textContent = "firing 90 concurrent requests…";
+  const res = await Promise.all(Array.from({length:90}, (_, i) =>
+    fetch("/v1/chat", { method:"POST",
+      headers:{"content-type":"application/json","x-api-key":"tenant-burst"},
+      body: JSON.stringify({ messages:[{role:"user",content:`burst ${Date.now()} ${i}`}] }) })));
+  const limited = res.filter((r) => r.status === 429).length;
+  $("out").textContent = `90 concurrent -> ${90-limited} allowed, ${limited} rate-limited (429).\n` +
+    `The token bucket is decremented atomically, so concurrent requests can't all slip through.`;
+  refresh();
+};
+
+async function refresh() {
+  const [s, recent] = await Promise.all([api("/v1/stats"), api("/v1/recent")]);
+  $("k-req").textContent   = s.requests;
+  $("k-hit").textContent   = Math.round(s.cacheHitRate * 100) + "%";
+  $("k-spend").textContent = "$" + s.spendUsd.toFixed(4);
+  $("k-saved").textContent = "$" + s.estimatedSavedUsd.toFixed(4);
+  $("k-p50").textContent   = s.p50Ms + "ms";
+  $("k-p95").textContent   = s.p95Ms + "ms";
+  $("k-fail").textContent  = s.failures;
+  $("k-store").textContent = s.store;
+  $("meta").textContent =
+    `state: ${s.store}  ·  providers: ${s.providers.map((p) => p.name + (p.ready ? "" : " (no key)")).join(", ")}` +
+    `  ·  failovers: ${s.failovers}`;
+  $("rows").innerHTML = recent.map((r) => `<tr>
+      <td>${(r.ts || "").slice(11, 19)}</td><td>${r.tenant}</td><td>${r.provider}</td>
+      <td><span class="pill ${!r.ok ? "bad" : r.cached ? "hit" : "miss"}">${!r.ok ? "fail" : r.cached ? "hit" : "miss"}</span></td>
+      <td>${r.inputTokens + r.outputTokens}</td><td>$${r.costUsd.toFixed(6)}</td><td>${r.ms}</td>
+    </tr>`).join("");
+}
+async function loadModels() {
+  const models = await api("/v1/models");
+  $("model").innerHTML = models
+    .filter((m) => m.available)
+    .map((m) => `<option value="${m.id}"${m.isDefault ? " selected" : ""}>${m.id} · ${m.tier}${m.note ? " · " + m.note : ""}</option>`)
+    .join("");
+}
+loadModels(); refresh(); setInterval(refresh, 2000);
+</script>
+</body></html>
