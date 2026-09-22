@@ -58,7 +58,18 @@ export interface ChatRequest {
    * it - see the note on Usage.thinkingTokens.
    */
   thinkingBudget?: number;
+  /** Stream the answer as server-sent events instead of one JSON body. */
+  stream?: boolean;
 }
+
+/**
+ * What a streaming provider yields: text as it arrives, then exactly one
+ * `final` carrying the complete response - the same ChatResponse a non-stream
+ * call returns, so accounting, caching and the response body reuse one path.
+ */
+export type StreamEvent =
+  | { type: "delta"; text: string }
+  | { type: "final"; response: ChatResponse };
 
 export interface Usage {
   inputTokens: number;
@@ -90,6 +101,8 @@ export interface Provider {
   /** False when no API key is configured - the factory skips unusable providers. */
   isReady(): boolean;
   complete(req: ChatRequest): Promise<ChatResponse>;
+  /** Optional: providers that cannot stream are served by `complete` and one delta. */
+  stream?(req: ChatRequest): AsyncIterable<StreamEvent>;
 }
 
 // Pricing lives in providers/registry.ts, beside the models it prices: one

@@ -14,9 +14,10 @@ from scratch to own the failure modes, not to compete with them.
 ```
 npm install
 npm start          # http://localhost:3200  (no API key, no Redis, no Docker needed)
-npm test           # 100 tests, offline, ~1s
+npm test           # 115 tests, offline, ~1s
 npm run demo       # scripted proof of every behaviour, in a second terminal
 npm run agent      # a 30-line agent using the gateway: tool loop, one request id across hops
+npm run agent:stream   # the same agent, streaming tokens as they arrive
 ```
 
 Then open **http://localhost:3200** (dashboard) and **/docs** (Swagger — every
@@ -150,6 +151,20 @@ outage). Budget fails *closed* with `503 store_unavailable` (the downside of
 being wrong is money). Accounting fails open (we already served — log it, never
 fail the response). The trace says which happened.
 
+**Streaming walks the same chain — and reliability applies only until the
+first byte.** `stream: true` (or `Accept: text/event-stream`) answers as
+server-sent events: `delta` events as tokens arrive, then one `done` whose data
+is exactly the one-shot response (usage, cost, `servedBy`, tool calls, trace).
+Everything decided before the provider call — a 429, a 400, a cache hit — is
+still plain JSON with a real status, because once a stream has started the
+status is 200 forever. Retries, the breaker and failover apply to *getting the
+first byte* (under a time-to-first-token budget); after that the route is
+committed — you cannot hand a client the second half of an answer from a
+different model — so a mid-stream failure is an `error` event, and an
+inter-token idle timeout replaces the whole-request one. The stream's answer is
+cached on completion; a cached answer is replayed as one delta. Same loop for
+the agent either way: [`examples/streaming-agent.ts`](examples/streaming-agent.ts).
+
 **503, not 500, when every provider fails.** 500 means *we* are broken. An
 upstream dependency failure is a different pager. Every error is JSON with a
 stable `error` code, a `requestId`, and — where it makes sense — a `Retry-After`
@@ -185,7 +200,9 @@ code, never on prose.
 
 Two clocks: `REQUEST_TIMEOUT_MS` bounds one provider attempt; `REQUEST_DEADLINE_MS`
 bounds the whole request, retries and failover included. "Each step was
-reasonable" can still add up to a minute the caller never agreed to.
+reasonable" can still add up to a minute the caller never agreed to. Streaming
+swaps the first for two of its own: `TTFT_TIMEOUT_MS` (until the first token)
+and `STREAM_IDLE_TIMEOUT_MS` (silence between tokens).
 
 ## Configuration
 
@@ -218,8 +235,6 @@ src/
   config.ts            env → typed config
   demo.ts              scripted end-to-end proof (npm run demo)
   tenants.ts           per-tenant policy: limits, budgets, provider allowlist (tenants.json)
-examples/
-  agent.ts             an agent that uses the gateway: the loop is the agent's, the transport is ours
   providers/
     registry.ts        model → provider/tier/price, and routePlan()
     types.ts           the neutral request/response shape (messages, tools, tool calls) and the adapter interface
@@ -229,6 +244,9 @@ examples/
   store/
     index.ts           Store interface, Redis implementation (Lua token bucket), memory fallback
   *.test.ts            node:test, no test framework to install
+examples/
+  agent.ts             an agent that uses the gateway: the loop is the agent's, the transport is ours
+  streaming-agent.ts   the same loop over server-sent events, SSE parsed by hand so nothing is hidden
 public/
   index.html           dashboard
   docs.html            Swagger UI
@@ -255,7 +273,7 @@ In order:
 
 1. **Auth** — real API keys mapped to tenant records; today the key *is* the tenant (required, but not verified) so multi-tenancy is testable without a user system.
 2. **Concurrency limits** per tenant and per provider (bulkheading). LLM calls are long-lived, so in-flight matters more than rate.
-3. **Streaming** — deliberately omitted. It changes three things at once: you can't cache what you haven't finished receiving, token counts only arrive at the end, and the timeout becomes TTFT plus inter-token idle rather than one total budget.
+3. **Tool calls mid-stream** — today tool calls arrive on the `done` event, because the loop needs the whole call to run it. Forwarding partial arguments as they stream (as the provider SDKs can) would let an agent start a tool before the model finishes.
 4. **Traces to OTel, the ledger to a warehouse** — `/metrics` is already scrapeable; `trace[]` becomes spans, `usage.jsonl` becomes a table.
 5. **Cost-aware routing** — the easy 80% (classification, extraction) to a small model, escalate the rest. The registry is a typed table and `routePlan()` is a pure function precisely so this is an addition, not surgery.
 6. **Redis Cluster / tenant sharding** — Redis is the next bottleneck. The per-concern failure policy is already in place (rate limit and cache fail *open*, budget fails *closed* — see the header of `pipeline.ts`); what's missing is making the store itself not a single point of failure.

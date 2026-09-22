@@ -95,3 +95,48 @@ test("the tool round-trip is mapped to model functionCall + user functionRespons
   assert.equal(fr.name, "get_weather", "the result is matched back to the call by id to recover the name");
   assert.deepEqual(fr.response, { result: "29C" });
 });
+
+test("stream: text parts are forwarded as they arrive; the final is parsed like a one-shot", async () => {
+  const chunks = [
+    { candidates: [{ content: { parts: [{ text: "gateway " }], role: "model" } }] },
+    { candidates: [{ content: { parts: [{ text: "reasoning...", thought: true }], role: "model" } }] },
+    { candidates: [{ content: { parts: [{ text: "online." }], role: "model" }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 3, thoughtsTokenCount: 84 } },
+  ];
+  const client: GeminiClient = {
+    models: {
+      async generateContent() { throw new Error("not used"); },
+      async generateContentStream() {
+        return (async function* () { for (const c of chunks) yield c as unknown as GenerateContentResponse; })();
+      },
+    },
+  };
+  const provider = new GoogleProvider("", "gemini-3.6-flash", client);
+  const deltas: string[] = [];
+  let final: import("./types.js").ChatResponse | undefined;
+  for await (const ev of provider.stream(ask("say it"))) {
+    if (ev.type === "delta") deltas.push(ev.text); else final = ev.response;
+  }
+  assert.deepEqual(deltas, ["gateway ", "online."], "thought parts are not forwarded");
+  assert.equal(final!.text, "gateway online.");
+  assert.equal(final!.usage.outputTokens, 3 + 84, "thinking tokens still counted on the streaming path");
+  assert.equal(final!.stopReason, "end");
+});
+
+test("stream: a functionCall part arriving in a chunk becomes a tool call with its signature", async () => {
+  const chunks = [
+    { candidates: [{ content: { parts: [{ functionCall: { name: "get_weather", args: { city: "Haifa" } }, thoughtSignature: "sig" }], role: "model" }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 5 } },
+  ];
+  const client: GeminiClient = {
+    models: {
+      async generateContent() { throw new Error("not used"); },
+      async generateContentStream() { return (async function* () { for (const c of chunks) yield c as unknown as GenerateContentResponse; })(); },
+    },
+  };
+  const provider = new GoogleProvider("", "gemini-3.6-flash", client);
+  let final: import("./types.js").ChatResponse | undefined;
+  for await (const ev of provider.stream(ask("weather?"))) if (ev.type === "final") final = ev.response;
+  assert.equal(final!.stopReason, "tool_use");
+  assert.deepEqual(final!.toolCalls, [{ id: "call_0", name: "get_weather", arguments: { city: "Haifa" }, signature: "sig" }]);
+});

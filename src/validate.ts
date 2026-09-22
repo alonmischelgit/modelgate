@@ -82,6 +82,10 @@ export function validateChatRequest(body: unknown): Validation {
     if (typeof b.cache !== "boolean") return fail("cache must be a boolean");
     req.cache = b.cache;
   }
+  if (b.stream !== undefined) {
+    if (typeof b.stream !== "boolean") return fail("stream must be a boolean");
+    req.stream = b.stream;
+  }
   if (b.tools !== undefined) {
     if (!Array.isArray(b.tools)) return fail("tools must be an array");
     const tools: ToolDef[] = [];

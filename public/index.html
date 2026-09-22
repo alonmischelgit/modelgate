@@ -52,6 +52,9 @@
       <label class="meta" title="Gemini 3.x reasons before answering; those tokens are billed as output">
         <input type="checkbox" id="nothink"> thinking off
       </label>
+      <label class="meta" title="Server-sent events: tokens appear as they arrive">
+        <input type="checkbox" id="stream" checked> stream
+      </label>
       <button id="send">Send</button>
       <button class="ghost" id="again">Send same again (cache)</button>
     </div>
@@ -88,16 +91,35 @@ const api = (p, o) => fetch(p, o).then((r) => r.json());
 async function send(text, tenant) {
   $("out").textContent = "…";
   const t0 = performance.now();
+  const streaming = $("stream").checked;
   const r = await fetch("/v1/chat", {
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": tenant },
     body: JSON.stringify({
       messages: [{ role: "user", content: text }],
       model: $("model").value || undefined,
+      stream: streaming,
       ...($("nothink").checked ? { thinkingBudget: 0 } : {}),
     }),
   });
-  const b = await r.json();
+  let b;
+  if (r.ok && /text\/event-stream/.test(r.headers.get("content-type") || "")) {
+    // Server-sent events: show tokens as they land, then the usual summary.
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "", live = "";
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, i); buf = buf.slice(i + 2);
+        const ev = /^event: (.+)$/m.exec(block)?.[1]; const data = JSON.parse(/^data: (.+)$/m.exec(block)?.[1] || "{}");
+        if (ev === "delta") { live += data.text; $("out").textContent = "streaming…\n\n" + live; }
+        else b = data;   // done or error: same shape as a one-shot response
+      }
+    }
+    if (!b) b = { error: "stream ended without done" };
+  } else {
+    b = await r.json();
+  }
   const ms = Math.round(performance.now() - t0);
   const served = b.servedBy ? `${b.servedBy.provider}/${b.servedBy.model}` : b.provider;
   const head = r.status === 200

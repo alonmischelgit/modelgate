@@ -11,18 +11,23 @@
 //      tokens, 2 visible. So the floor below is not a nicety.
 //   2. Billing only candidatesTokenCount understates cost by an order of
 //      magnitude. Measured: 3 visible tokens, 98 thought tokens, all billable.
-import { GoogleGenAI, type Content, type Part, type GenerateContentParameters, type GenerateContentResponse } from "@google/genai";
 import {
-  ChatRequest, ChatResponse, Provider, ToolCall, estimateTokens, toolNameForCall,
+  GoogleGenAI, type Content, type Part, type GenerateContentParameters, type GenerateContentResponse,
+} from "@google/genai";
+import {
+  ChatRequest, ChatResponse, Provider, StreamEvent, ToolCall, estimateTokens, toolNameForCall,
 } from "./types.js";
 import { config } from "../config.js";
 
 /** Headroom so a thinking model has room to think AND answer. */
 export const MIN_OUTPUT_TOKENS = 512;
 
-/** The one SDK call the adapter makes - narrow so tests can inject a fake. */
+/** The two SDK calls the adapter makes - narrow so tests can inject a fake. */
 export interface GeminiClient {
-  models: { generateContent(params: GenerateContentParameters): Promise<GenerateContentResponse> };
+  models: {
+    generateContent(params: GenerateContentParameters): Promise<GenerateContentResponse>;
+    generateContentStream?(params: GenerateContentParameters): Promise<AsyncGenerator<GenerateContentResponse>>;
+  };
 }
 
 export class GoogleProvider implements Provider {
@@ -35,10 +40,8 @@ export class GoogleProvider implements Provider {
 
   isReady() { return this.client !== null; }
 
-  async complete(req: ChatRequest): Promise<ChatResponse> {
-    if (!this.client) throw new Error("google: GOOGLE_API_KEY not configured");
-    const model = req.model ?? this.defaultModel;
-
+  /** Our neutral request -> Gemini's parameters. */
+  private params(req: ChatRequest, model: string): { params: GenerateContentParameters; contents: Content[]; system: string } {
     // Gemini takes a system instruction plus alternating user/model turns.
     // Tool calls ride on the model turn as functionCall parts; tool results go
     // back as functionResponse parts on a user turn.
@@ -66,7 +69,7 @@ export class GoogleProvider implements Provider {
     // caller asked for a short ANSWER; they did not ask for a short think.
     const maxOutputTokens = Math.max(req.maxTokens ?? config.policy.defaultMaxTokens, MIN_OUTPUT_TOKENS);
 
-    const res = await this.client.models.generateContent({
+    return { contents, system, params: {
       model,
       contents,
       config: {
@@ -82,11 +85,19 @@ export class GoogleProvider implements Provider {
             })) }] }
           : {}),
       },
-    });
+    } };
+  }
 
-    // Read the parts directly: res.text drops thought-signed parts, and the
-    // function calls (and their signatures) only exist at the part level.
-    const parts = res.candidates?.[0]?.content?.parts ?? [];
+  /**
+   * Gemini's parts -> our neutral response. Reads the parts directly: the
+   * SDK's `.text` drops thought-signed parts, and the function calls (and
+   * their signatures) only exist at the part level. Shared by the one-shot
+   * and streaming paths - a stream is just parts arriving over time.
+   */
+  private parse(
+    parts: Part[], um: GenerateContentResponse["usageMetadata"], finish: string | undefined,
+    model: string, fallbackInput: string,
+  ): ChatResponse {
     const text = parts.filter((p) => !p.thought && p.text).map((p) => p.text).join("");
     const toolCalls: ToolCall[] = parts
       .filter((p) => p.functionCall)
@@ -97,10 +108,8 @@ export class GoogleProvider implements Provider {
         ...(p.thoughtSignature ? { signature: p.thoughtSignature } : {}),
       }));
 
-    const um = res.usageMetadata;
     const thinking = um?.thoughtsTokenCount ?? 0;
     const visible = um?.candidatesTokenCount ?? estimateTokens(text);
-    const finish = res.candidates?.[0]?.finishReason;
 
     if (finish === "MAX_TOKENS" && !text.trim() && toolCalls.length === 0) {
       // Fail loudly rather than returning "" and letting it be cached as a valid
@@ -116,12 +125,53 @@ export class GoogleProvider implements Provider {
       ...(toolCalls.length ? { toolCalls } : {}),
       stopReason: toolCalls.length ? "tool_use" : finish === "MAX_TOKENS" ? "max_tokens" : "end",
       usage: {
-        inputTokens: um?.promptTokenCount ?? estimateTokens(JSON.stringify(contents) + system),
+        inputTokens: um?.promptTokenCount ?? estimateTokens(fallbackInput),
         outputTokens: visible + thinking,   // providers bill thinking as output
         thinkingTokens: thinking || undefined,
       },
       model,
       provider: this.name,
     };
+  }
+
+  async complete(req: ChatRequest): Promise<ChatResponse> {
+    if (!this.client) throw new Error("google: GOOGLE_API_KEY not configured");
+    const model = req.model ?? this.defaultModel;
+    const { params, contents, system } = this.params(req, model);
+    const res = await this.client.models.generateContent(params);
+    return this.parse(res.candidates?.[0]?.content?.parts ?? [], res.usageMetadata,
+      res.candidates?.[0]?.finishReason, model, JSON.stringify(contents) + system);
+  }
+
+  /**
+   * Same request, parts arriving as chunks. Visible text is forwarded as it
+   * comes; every part is also accumulated so the final response is parsed by
+   * exactly the same code as a one-shot call - tool calls, signatures,
+   * thinking tokens and all. Usage metadata is cumulative on Gemini chunks, so
+   * the last one seen is the total.
+   */
+  async *stream(req: ChatRequest): AsyncIterable<StreamEvent> {
+    if (!this.client) throw new Error("google: GOOGLE_API_KEY not configured");
+    if (!this.client.models.generateContentStream) {
+      yield { type: "final", response: await this.complete(req) };
+      return;
+    }
+    const model = req.model ?? this.defaultModel;
+    const { params, contents, system } = this.params(req, model);
+    const chunks = await this.client.models.generateContentStream(params);
+
+    const parts: Part[] = [];
+    let usage: GenerateContentResponse["usageMetadata"];
+    let finish: string | undefined;
+    for await (const chunk of chunks) {
+      const cand = chunk.candidates?.[0];
+      for (const p of cand?.content?.parts ?? []) {
+        parts.push(p);
+        if (p.text && !p.thought) yield { type: "delta", text: p.text };
+      }
+      if (chunk.usageMetadata) usage = chunk.usageMetadata;
+      if (cand?.finishReason) finish = cand.finishReason;
+    }
+    yield { type: "final", response: this.parse(parts, usage, finish, model, JSON.stringify(contents) + system) };
   }
 }

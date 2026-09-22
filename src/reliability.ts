@@ -15,10 +15,17 @@
 //
 // Jitter matters: without it, every client retries at the same instant and the
 // recovering provider is knocked over again by a synchronised thundering herd.
+//
+// STREAMING changes one thing: all four layers apply only UNTIL THE FIRST
+// BYTE. Once a chunk has reached the client you cannot transparently switch
+// providers - the client already has half an answer from model A. So the
+// reliability wraps the connection, not the stream: retry, breaker and
+// failover until the first token; after that a failure is an error the client
+// sees, not one we hide.
 // =============================================================================
 import { Store } from "./store/index.js";
 import { config } from "./config.js";
-import { ChatRequest, ChatResponse, Provider } from "./providers/types.js";
+import { ChatRequest, ChatResponse, Provider, StreamEvent } from "./providers/types.js";
 import { RouteStep } from "./providers/registry.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -95,6 +102,12 @@ export interface CallOutcome {
   breakerSkipped: string[];
 }
 
+/** A stream that has delivered its first byte: the route is committed. */
+export interface StreamOutcome extends Omit<CallOutcome, "response"> {
+  /** The first event is included; consume to the `final` event to get the response. */
+  events: AsyncIterable<StreamEvent>;
+}
+
 /**
  * Two clocks. The per-attempt TIMEOUT bounds one provider call. The DEADLINE
  * bounds the whole request - retries, backoff and failover included - because
@@ -106,23 +119,35 @@ export class DeadlineExceeded extends Error {
   constructor(ms: number) { super(`request deadline of ${ms}ms exceeded`); }
 }
 
-/** Try one provider with timeout + retries. Throws if all attempts fail. */
-async function callWithRetries(
+/** A stream failed after the client had already received part of it. Not recoverable. */
+export class StreamInterrupted extends Error {
+  readonly status = 502;
+  constructor(cause: string) { super(`stream interrupted after first byte: ${cause}`); }
+}
+
+/**
+ * Run one attempt of `work` against a provider, with timeout + retries.
+ * Generic over what an attempt returns: a full response (non-stream) or an
+ * opened stream that has produced its first event (stream). Throws if every
+ * attempt fails.
+ */
+async function withRetries<T>(
   provider: Provider,
-  req: ChatRequest,
+  work: (timeoutMs: number) => Promise<T>,
   breaker: CircuitBreaker,
   deadlineAt: number,
+  perAttemptMs: number,
   onAttempt: (n: number, err?: unknown) => void,
-): Promise<{ response: ChatResponse; attempts: number }> {
+): Promise<{ value: T; attempts: number }> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= config.reliability.maxAttempts; attempt++) {
     const left = deadlineAt - Date.now();
     if (left <= 0) throw new DeadlineExceeded(config.policy.requestDeadlineMs);
     try {
-      const response = await withTimeout(provider.complete(req), Math.min(config.policy.requestTimeoutMs, left));
+      const value = await work(Math.min(perAttemptMs, left));
       await breaker.recordSuccess(provider.name);
       onAttempt(attempt);
-      return { response, attempts: attempt };
+      return { value, attempts: attempt };
     } catch (err) {
       lastErr = err;
       onAttempt(attempt, err);
@@ -139,11 +164,11 @@ async function callWithRetries(
   throw lastErr;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+function withTimeout<T>(p: Promise<T>, ms: number, what = "timeout"): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<T>((_, reject) => {
     timer = setTimeout(
-      () => reject(Object.assign(new Error(`timeout after ${ms}ms`), { status: 504 })), ms);
+      () => reject(Object.assign(new Error(`${what} after ${ms}ms`), { status: 504 })), ms);
   });
   // Clear the timer either way. Left armed, every successful call leaks a
   // pending timer for the full timeout - harmless-looking, until a burst of
@@ -152,19 +177,18 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Walk the route plan in order; each step gets timeout + retries, and when a
- * step is exhausted we move to the next. Providers whose breaker is open are
- * skipped entirely - that is the whole point of a breaker, to fail fast
- * instead of waiting to fail.
+ * Walk the route plan in order, skipping providers that are not configured or
+ * whose breaker is open; `attempt` runs one step. Shared by the non-stream and
+ * stream paths - the plan-walking is identical, only the unit of work differs.
  */
-export async function callWithFailover(
+async function walkPlan<T>(
   plan: RouteStep[],
   providers: Map<string, Provider>,
-  req: ChatRequest,
   breaker: CircuitBreaker,
   trace: (msg: string) => void,
-  deadlineAt: number = Date.now() + config.policy.requestDeadlineMs,
-): Promise<CallOutcome> {
+  deadlineAt: number,
+  attempt: (provider: Provider, step: RouteStep, onAttempt: (n: number, err?: unknown) => void) => Promise<T>,
+): Promise<{ value: T; step: RouteStep; index: number; attempts: number; breakerSkipped: string[] }> {
   const breakerSkipped: string[] = [];
   let lastErr: unknown;
   let attempts = 0;   // across the whole plan - the caller paid for all of them
@@ -188,20 +212,13 @@ export async function callWithFailover(
       trace(`substituting ${step.model} on ${step.provider} (same tier) - reported in the response`);
     }
     try {
-      // Send the model id THIS provider understands, not the one the caller
-      // happened to name. That mapping is the router's job.
-      const { response } = await callWithRetries(
-        provider, { ...req, model: step.model }, breaker, deadlineAt,
-        (n, err) => {
-          attempts++;
-          trace(err
-            ? `${step.provider}/${step.model} attempt ${n} failed: ${(err as Error).message}`
-            : `${step.provider}/${step.model} attempt ${n} ok`);
-        });
-      return {
-        response, providerUsed: step.provider, modelUsed: step.model,
-        substituted: step.substitute, attempts, failedOver: i > 0, breakerSkipped,
-      };
+      const value = await attempt(provider, step, (n, err) => {
+        attempts++;
+        trace(err
+          ? `${step.provider}/${step.model} attempt ${n} failed: ${(err as Error).message}`
+          : `${step.provider}/${step.model} attempt ${n} ok`);
+      });
+      return { value, step, index: i, attempts, breakerSkipped };
     } catch (err) {
       if (err instanceof DeadlineExceeded) throw err;   // no point moving on
       lastErr = err;
@@ -209,4 +226,91 @@ export async function callWithFailover(
     }
   }
   throw lastErr ?? new Error("no provider in the route plan could serve this request");
+}
+
+/** Non-stream: each step gets timeout + retries; a full response is the unit of work. */
+export async function callWithFailover(
+  plan: RouteStep[],
+  providers: Map<string, Provider>,
+  req: ChatRequest,
+  breaker: CircuitBreaker,
+  trace: (msg: string) => void,
+  deadlineAt: number = Date.now() + config.policy.requestDeadlineMs,
+): Promise<CallOutcome> {
+  const r = await walkPlan(plan, providers, breaker, trace, deadlineAt, async (provider, step, onAttempt) => {
+    // Send the model id THIS provider understands, not the one the caller
+    // happened to name. That mapping is the router's job.
+    const { value } = await withRetries(
+      provider, (ms) => withTimeout(provider.complete({ ...req, model: step.model }), ms),
+      breaker, deadlineAt, config.policy.requestTimeoutMs, onAttempt);
+    return value;
+  });
+  return {
+    response: r.value, providerUsed: r.step.provider, modelUsed: r.step.model,
+    substituted: r.step.substitute, attempts: r.attempts, failedOver: r.index > 0, breakerSkipped: r.breakerSkipped,
+  };
+}
+
+/**
+ * Stream: the unit of work is "open the stream and receive the FIRST event"
+ * under the time-to-first-token budget. Retries, breaker and failover apply to
+ * that. Once the first event is in hand the route is committed: the remaining
+ * events are forwarded under an inter-token idle timeout, and a failure there
+ * is a StreamInterrupted the caller must surface, never a silent switch.
+ *
+ * A provider without `stream` is served by `complete` as one delta - the
+ * caller sees a stream either way.
+ */
+export async function openStreamWithFailover(
+  plan: RouteStep[],
+  providers: Map<string, Provider>,
+  req: ChatRequest,
+  breaker: CircuitBreaker,
+  trace: (msg: string) => void,
+  deadlineAt: number = Date.now() + config.policy.requestDeadlineMs,
+): Promise<StreamOutcome> {
+  type Opened = { first: StreamEvent; rest: AsyncIterator<StreamEvent> };
+
+  const r = await walkPlan(plan, providers, breaker, trace, deadlineAt, async (provider, step, onAttempt) => {
+    const stepReq = { ...req, model: step.model };
+    const { value } = await withRetries<Opened>(provider, async (ms) => {
+      if (!provider.stream) {
+        // Non-streaming provider: one delta then final, so the contract holds.
+        const response = await withTimeout(provider.complete(stepReq), ms);
+        const rest = (async function* () { yield { type: "final", response } as StreamEvent; })();
+        return { first: { type: "delta", text: response.text }, rest };
+      }
+      const it = provider.stream(stepReq)[Symbol.asyncIterator]();
+      const n = await withTimeout(it.next(), ms, "time to first token");
+      if (n.done) throw Object.assign(new Error("stream ended before any event"), { status: 502 });
+      return { first: n.value, rest: it };
+    }, breaker, deadlineAt, config.policy.ttftTimeoutMs, onAttempt);
+    return value;
+  });
+
+  const { first, rest } = r.value;
+  const provider = r.step.provider;
+  async function* events(): AsyncIterable<StreamEvent> {
+    yield first;
+    if (first.type === "final") return;
+    for (;;) {
+      let n: IteratorResult<StreamEvent>;
+      try {
+        n = await withTimeout(rest.next(), config.policy.streamIdleTimeoutMs, "stream idle");
+      } catch (err) {
+        // Past the first byte: no retry, no failover. Count it against the
+        // breaker (it IS a provider failure) and tell the caller.
+        if (countsAgainstBreaker(err)) await breaker.recordFailure(provider);
+        throw new StreamInterrupted((err as Error).message);
+      }
+      if (n.done) throw new StreamInterrupted("provider closed the stream without a final event");
+      yield n.value;
+      if (n.value.type === "final") return;
+    }
+  }
+
+  return {
+    events: events(), providerUsed: provider, modelUsed: r.step.model,
+    substituted: r.step.substitute, attempts: r.attempts, failedOver: r.index > 0, breakerSkipped: r.breakerSkipped,
+  };
 }

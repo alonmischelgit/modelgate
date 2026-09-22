@@ -6,14 +6,18 @@
 // no API key, no network and no spend. The interesting engineering here is the
 // gateway, not the model, so the model should not be a prerequisite for showing
 // it. It also makes the failover demo reproducible: we can make a provider fail
-// on command.
+// on command - before the first byte, or in the middle of a stream.
 // -----------------------------------------------------------------------------
-import { ChatRequest, ChatResponse, Provider, ToolCall, estimateTokens } from "./types.js";
+import { ChatRequest, ChatResponse, Provider, StreamEvent, ToolCall, estimateTokens } from "./types.js";
 
 export class MockProvider implements Provider {
   readonly name: string;
   /** Flip at runtime to simulate an outage (used by the failover demo). */
   public failing = false;
+  /** Streaming chaos: fail after this many chunks have been sent (0 = never). */
+  public failAfterChunks = 0;
+  /** Streaming chaos: stop sending (hang) after this many chunks (0 = never). */
+  public stallAfterChunks = 0;
   public latencyMs: number;
 
   constructor(name = "mock", latencyMs = 180) {
@@ -23,13 +27,14 @@ export class MockProvider implements Provider {
 
   isReady() { return true; }
 
-  async complete(req: ChatRequest): Promise<ChatResponse> {
-    await new Promise((r) => setTimeout(r, this.latencyMs));
-    if (this.failing) {
-      const err = new Error(`${this.name}: upstream unavailable (simulated)`) as Error & { status?: number };
-      err.status = 503;
-      throw err;
-    }
+  private outage(): Error & { status?: number } {
+    const err = new Error(`${this.name}: upstream unavailable (simulated)`) as Error & { status?: number };
+    err.status = 503;
+    return err;
+  }
+
+  /** The answer, computed up front; streaming just paces it out. */
+  private answer(req: ChatRequest): ChatResponse {
     const prompt = req.messages.map((m) => m.content).join("\n");
     const inputTokens = estimateTokens(prompt);
     const last = req.messages.at(-1);
@@ -61,9 +66,27 @@ export class MockProvider implements Provider {
       ? `[${this.name}] Answer using the tool result: "${last.content.slice(0, 80)}"`
       : `[${this.name}] I received ${req.messages.length} message(s), ${inputTokens} input tokens. ` +
         `Last message: "${last?.content.slice(0, 60) ?? ""}"`;
-    return {
-      ...base, text, stopReason: "end",
-      usage: { inputTokens, outputTokens: estimateTokens(text) },
-    };
+    return { ...base, text, stopReason: "end", usage: { inputTokens, outputTokens: estimateTokens(text) } };
+  }
+
+  async complete(req: ChatRequest): Promise<ChatResponse> {
+    await new Promise((r) => setTimeout(r, this.latencyMs));
+    if (this.failing) throw this.outage();
+    return this.answer(req);
+  }
+
+  /** Word by word, a few ms apart, so the demo visibly streams with no key. */
+  async *stream(req: ChatRequest): AsyncIterable<StreamEvent> {
+    await new Promise((r) => setTimeout(r, this.latencyMs / 4));   // time to first token
+    if (this.failing) throw this.outage();
+    const final = this.answer(req);
+    const words = final.text ? final.text.split(/(?<=\s)/) : [];
+    for (const [i, w] of words.entries()) {
+      if (this.stallAfterChunks && i >= this.stallAfterChunks) await new Promise(() => {});   // hang forever
+      if (this.failAfterChunks && i >= this.failAfterChunks) throw this.outage();
+      await new Promise((r) => setTimeout(r, Math.max(1, this.latencyMs / 20)));
+      yield { type: "delta", text: w };
+    }
+    yield { type: "final", response: final };
   }
 }

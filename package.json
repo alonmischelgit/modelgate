@@ -9,6 +9,7 @@
     "start": "tsx src/server.ts",
     "demo": "tsx src/demo.ts",
     "agent": "tsx examples/agent.ts",
+    "agent:stream": "tsx examples/streaming-agent.ts",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },

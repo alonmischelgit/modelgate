@@ -7,7 +7,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import crypto from "node:crypto";
 import path from "node:path";
 import { config, root } from "./config.js";
-import { handleChat, type GatewayDeps } from "./pipeline.js";
+import { handleChat, handleChatStream, type GatewayDeps, type GatewayResult } from "./pipeline.js";
 import { stats, recentRequests, prometheus } from "./metrics.js";
 import { providerStatus, setMockFailing } from "./providers/index.js";
 import { MODELS } from "./providers/registry.js";
@@ -58,14 +58,39 @@ export function createApp(deps: GatewayDeps) {
     // The HTTP way to say "fresh answer, please". Same effect as `cache: false`
     // in the body; the header exists because every HTTP client already knows it.
     if (/\bno-cache\b|\bno-store\b/i.test(req.header("cache-control") ?? "")) v.req.cache = false;
-    try {
-      const result = await handleChat(tenant, v.req, deps, requestId);
+    // ...and the HTTP way to ask for a stream, as OpenAI/Anthropic clients do.
+    if (/text\/event-stream/i.test(req.header("accept") ?? "")) v.req.stream = true;
+
+    const sendJson = (result: GatewayResult) => {
       // Retry-After is the header clients actually honour; the body field is
       // for humans reading the JSON.
       const retryAfter = result.body.retryAfterSec;
       if (typeof retryAfter === "number") res.setHeader("Retry-After", String(retryAfter));
       res.status(result.status).json({ ...result.body, trace: result.trace });
+    };
+
+    try {
+      if (!v.req.stream) { sendJson(await handleChat(tenant, v.req, deps, requestId)); return; }
+
+      // Streaming. Anything decided before the provider call (a 429, a 400, a
+      // cache hit) is still one JSON answer, sent with a real status code -
+      // once the stream has started, the status is 200 forever, so the only
+      // place errors can carry a status is before the first byte.
+      const out = await handleChatStream(tenant, v.req, deps, requestId);
+      if ("early" in out) { sendJson(out.early); return; }
+      res.status(200).set({
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+        "connection": "keep-alive",
+        "x-accel-buffering": "no",   // tell nginx-style proxies not to buffer
+      }).flushHeaders();
+      for await (const ev of out.events) {
+        if (res.destroyed) break;   // client went away; stop forwarding
+        res.write(`event: ${ev.event}\ndata: ${JSON.stringify(ev.data)}\n\n`);
+      }
+      res.end();
     } catch (err) {
+      if (res.headersSent) { res.end(); return; }   // nothing sensible left to say mid-stream
       next(err);
     }
   });

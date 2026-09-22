@@ -34,6 +34,11 @@ export const config = {
     cacheTtlSeconds: Number(process.env.CACHE_TTL_SECONDS ?? 300),
     requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS ?? 30_000),   // per attempt
     requestDeadlineMs: Number(process.env.REQUEST_DEADLINE_MS ?? 60_000), // for the whole request, retries and failover included
+    // Streaming has two clocks instead of one: how long until the FIRST token
+    // (is the provider alive?) and how long between tokens (did it stall?).
+    // One total budget would kill every legitimately long answer.
+    ttftTimeoutMs: Number(process.env.TTFT_TIMEOUT_MS ?? 30_000),
+    streamIdleTimeoutMs: Number(process.env.STREAM_IDLE_TIMEOUT_MS ?? 30_000),
     defaultModel: process.env.DEFAULT_MODEL ?? "mock-small",
     // One default for every provider, so the same request costs the same
     // regardless of which adapter serves it.

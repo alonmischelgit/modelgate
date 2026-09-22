@@ -122,3 +122,39 @@ test("oversized body -> 413 payload_too_large, as JSON", async () => {
   assert.equal(r.status, 413);
   assert.equal((await r.json() as { error: string }).error, "payload_too_large");
 });
+
+// --- Streaming over HTTP ------------------------------------------------------
+
+function parseSse(text: string) {
+  return text.split("\n\n").filter(Boolean).map((block) => {
+    const event = /^event: (.+)$/m.exec(block)?.[1] ?? "message";
+    const data = JSON.parse(/^data: (.+)$/m.exec(block)?.[1] ?? "{}");
+    return { event, data };
+  });
+}
+
+test("stream: true -> text/event-stream with delta events and a final done", async () => {
+  const r = await post({ messages: [{ role: "user", content: "stream over http" }], stream: true });
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get("content-type") ?? "", /text\/event-stream/);
+  assert.equal(r.headers.get("x-request-id")?.length, 36);
+  const events = parseSse(await r.text());
+  const deltas = events.filter((e) => e.event === "delta");
+  const done = events.find((e) => e.event === "done");
+  assert.ok(deltas.length > 1);
+  assert.ok(done);
+  assert.equal(deltas.map((d) => d.data.text).join(""), done.data.text);
+  assert.equal(done.data.requestId, r.headers.get("x-request-id"));
+});
+
+test("Accept: text/event-stream asks for a stream, like the provider SDKs do", async () => {
+  const r = await post({ messages: [{ role: "user", content: "accept header" }] }, { accept: "text/event-stream" });
+  assert.match(r.headers.get("content-type") ?? "", /text\/event-stream/);
+});
+
+test("a streaming request that fails before the first byte is plain JSON with a real status", async () => {
+  const r = await post({ messages: [{ role: "user", content: "x" }], model: "nope", stream: true });
+  assert.equal(r.status, 400);
+  assert.match(r.headers.get("content-type") ?? "", /application\/json/);
+  assert.equal((await r.json() as { error: string }).error, "unknown_model");
+});

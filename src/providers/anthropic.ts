@@ -1,8 +1,8 @@
 // Anthropic (Claude) adapter - the second provider, which is what makes the
 // failover path real rather than theoretical.
 import Anthropic from "@anthropic-ai/sdk";
-import type { MessageParam, ContentBlockParam } from "@anthropic-ai/sdk/resources/messages";
-import { ChatRequest, ChatResponse, Provider, ToolCall } from "./types.js";
+import type { Message, MessageCreateParamsNonStreaming, MessageParam, ContentBlockParam } from "@anthropic-ai/sdk/resources/messages";
+import { ChatRequest, ChatResponse, Provider, StreamEvent, ToolCall } from "./types.js";
 import { config } from "../config.js";
 
 export class AnthropicProvider implements Provider {
@@ -15,9 +15,8 @@ export class AnthropicProvider implements Provider {
 
   isReady() { return this.client !== null; }
 
-  async complete(req: ChatRequest): Promise<ChatResponse> {
-    if (!this.client) throw new Error("anthropic: ANTHROPIC_API_KEY not configured");
-    const model = req.model ?? this.defaultModel;
+  /** Our neutral request -> Claude's parameters. */
+  private params(req: ChatRequest, model: string): MessageCreateParamsNonStreaming {
     const system = req.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
 
     // Claude wants strictly alternating user/assistant turns. Tool calls are
@@ -38,7 +37,7 @@ export class AnthropicProvider implements Provider {
       messages.push({ role: m.role, content });
     }
 
-    const res = await this.client.messages.create({
+    return {
       model,
       max_tokens: req.maxTokens ?? config.policy.defaultMaxTokens,
       ...(system ? { system } : {}),
@@ -47,13 +46,15 @@ export class AnthropicProvider implements Provider {
         ? { tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters as never })) }
         : {}),
       messages,
-    });
+    };
+  }
 
+  /** Claude's message -> our neutral response. Shared by one-shot and stream. */
+  private parse(res: Message, model: string): ChatResponse {
     const text = res.content.filter((b) => b.type === "text").map((b) => b.text).join("");
     const toolCalls: ToolCall[] = res.content
       .filter((b) => b.type === "tool_use")
       .map((b) => ({ id: b.id, name: b.name, arguments: (b.input ?? {}) as Record<string, unknown> }));
-
     return {
       text,
       ...(toolCalls.length ? { toolCalls } : {}),
@@ -62,5 +63,24 @@ export class AnthropicProvider implements Provider {
       model,
       provider: this.name,
     };
+  }
+
+  async complete(req: ChatRequest): Promise<ChatResponse> {
+    if (!this.client) throw new Error("anthropic: ANTHROPIC_API_KEY not configured");
+    const model = req.model ?? this.defaultModel;
+    return this.parse(await this.client.messages.create(this.params(req, model)), model);
+  }
+
+  /** Text deltas as they arrive; the SDK assembles the final message for us. */
+  async *stream(req: ChatRequest): AsyncIterable<StreamEvent> {
+    if (!this.client) throw new Error("anthropic: ANTHROPIC_API_KEY not configured");
+    const model = req.model ?? this.defaultModel;
+    const s = this.client.messages.stream(this.params(req, model));
+    for await (const ev of s) {
+      if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
+        yield { type: "delta", text: ev.delta.text };
+      }
+    }
+    yield { type: "final", response: this.parse(await s.finalMessage(), model) };
   }
 }

@@ -71,7 +71,9 @@ test("provider allowlist: a forbidden provider is simply not in the route plan",
   const g = await gateway();
   const r = await handleChat("no-alt", ask("route me"), g);
   assert.equal(r.status, 200);
-  assert.ok(r.trace.some((l) => l.startsWith("   0ms route: mock-primary/mock-small") && !l.includes("mock-secondary")));
+  const routeLine = r.trace.find((l) => /route: /.test(l)) ?? "";
+  assert.match(routeLine, /route: mock-primary\/mock-small/);
+  assert.ok(!routeLine.includes("mock-secondary"), "the forbidden provider must not appear in the plan");
 });
 
 test("provider allowlist: with the only allowed provider down, it is an honest failure, never the forbidden one", async () => {
