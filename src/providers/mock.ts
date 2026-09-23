@@ -87,6 +87,13 @@ export class MockProvider implements Provider {
       await new Promise((r) => setTimeout(r, Math.max(1, this.latencyMs / 20)));
       yield { type: "delta", text: w };
     }
+    // A tool call is emitted the moment it is complete - here, before the turn
+    // ends - exactly as a real provider does, so the agent can start running
+    // it without waiting for `final`.
+    for (const call of final.toolCalls ?? []) {
+      await new Promise((r) => setTimeout(r, Math.max(1, this.latencyMs / 20)));
+      yield { type: "tool_call", call };
+    }
     yield { type: "final", response: final };
   }
 }

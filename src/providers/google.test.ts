@@ -115,7 +115,7 @@ test("stream: text parts are forwarded as they arrive; the final is parsed like 
   const deltas: string[] = [];
   let final: import("./types.js").ChatResponse | undefined;
   for await (const ev of provider.stream(ask("say it"))) {
-    if (ev.type === "delta") deltas.push(ev.text); else final = ev.response;
+    if (ev.type === "delta") deltas.push(ev.text); else if (ev.type === "final") final = ev.response;
   }
   assert.deepEqual(deltas, ["gateway ", "online."], "thought parts are not forwarded");
   assert.equal(final!.text, "gateway online.");
@@ -139,4 +139,31 @@ test("stream: a functionCall part arriving in a chunk becomes a tool call with i
   for await (const ev of provider.stream(ask("weather?"))) if (ev.type === "final") final = ev.response;
   assert.equal(final!.stopReason, "tool_use");
   assert.deepEqual(final!.toolCalls, [{ id: "call_0", name: "get_weather", arguments: { city: "Haifa" }, signature: "sig" }]);
+});
+
+test("stream: a tool call is emitted the moment its part arrives, before final, with the same id final uses", async () => {
+  const chunks = [
+    { candidates: [{ content: { parts: [{ functionCall: { name: "get_weather", args: { city: "Haifa" } }, thoughtSignature: "s1" }], role: "model" } }] },
+    { candidates: [{ content: { parts: [{ functionCall: { name: "get_time", args: { tz: "Asia/Jerusalem" } } }], role: "model" }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 8 } },
+  ];
+  const client: GeminiClient = {
+    models: {
+      async generateContent() { throw new Error("not used"); },
+      async generateContentStream() { return (async function* () { for (const c of chunks) yield c as unknown as GenerateContentResponse; })(); },
+    },
+  };
+  const provider = new GoogleProvider("", "gemini-3.6-flash", client);
+  const order: string[] = [];
+  const emitted: import("./types.js").ToolCall[] = [];
+  let final: import("./types.js").ChatResponse | undefined;
+  for await (const ev of provider.stream(ask("weather and time?"))) {
+    order.push(ev.type);
+    if (ev.type === "tool_call") emitted.push(ev.call);
+    if (ev.type === "final") final = ev.response;
+  }
+  assert.deepEqual(order, ["tool_call", "tool_call", "final"]);
+  assert.deepEqual(emitted.map((c) => c.id), ["call_0", "call_1"]);
+  assert.deepEqual(final!.toolCalls, emitted, "final repeats exactly what was emitted, ids included");
+  assert.equal(emitted[0].signature, "s1");
 });

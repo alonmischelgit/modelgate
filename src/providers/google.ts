@@ -88,6 +88,16 @@ export class GoogleProvider implements Provider {
     } };
   }
 
+  /** One functionCall part -> one neutral ToolCall. `index` gives a stable id when Gemini sends none. */
+  private toToolCall(p: Part, index: number): ToolCall {
+    return {
+      id: p.functionCall!.id ?? `call_${index}`,
+      name: p.functionCall!.name ?? "",
+      arguments: p.functionCall!.args ?? {},
+      ...(p.thoughtSignature ? { signature: p.thoughtSignature } : {}),
+    };
+  }
+
   /**
    * Gemini's parts -> our neutral response. Reads the parts directly: the
    * SDK's `.text` drops thought-signed parts, and the function calls (and
@@ -99,14 +109,7 @@ export class GoogleProvider implements Provider {
     model: string, fallbackInput: string,
   ): ChatResponse {
     const text = parts.filter((p) => !p.thought && p.text).map((p) => p.text).join("");
-    const toolCalls: ToolCall[] = parts
-      .filter((p) => p.functionCall)
-      .map((p, i) => ({
-        id: p.functionCall!.id ?? `call_${i}`,
-        name: p.functionCall!.name ?? "",
-        arguments: p.functionCall!.args ?? {},
-        ...(p.thoughtSignature ? { signature: p.thoughtSignature } : {}),
-      }));
+    const toolCalls: ToolCall[] = parts.filter((p) => p.functionCall).map((p, i) => this.toToolCall(p, i));
 
     const thinking = um?.thoughtsTokenCount ?? 0;
     const visible = um?.candidatesTokenCount ?? estimateTokens(text);
@@ -163,11 +166,16 @@ export class GoogleProvider implements Provider {
     const parts: Part[] = [];
     let usage: GenerateContentResponse["usageMetadata"];
     let finish: string | undefined;
+    let calls = 0;
     for await (const chunk of chunks) {
       const cand = chunk.candidates?.[0];
       for (const p of cand?.content?.parts ?? []) {
         parts.push(p);
         if (p.text && !p.thought) yield { type: "delta", text: p.text };
+        // Gemini sends each function call as one complete part, so it can be
+        // handed to the agent the moment it arrives. Same index-based id as
+        // parse() will assign, so `final.toolCalls` matches what was emitted.
+        if (p.functionCall) yield { type: "tool_call", call: this.toToolCall(p, calls++) };
       }
       if (chunk.usageMetadata) usage = chunk.usageMetadata;
       if (cand?.finishReason) finish = cand.finishReason;

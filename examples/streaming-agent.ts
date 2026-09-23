@@ -70,8 +70,18 @@ async function main(): Promise<string | undefined> {
 
     process.stdout.write(`\nhop ${hops}  `);
     let done: Done | undefined;
+    // Each tool call arrives as its own event the moment it is complete - so
+    // we run it right away, while the model may still be producing the next
+    // one. `done` repeats every call, so nothing is lost if we missed one.
+    const results = new Map<string, string>();
     for await (const { event, data } of sse(res.body)) {
       if (event === "delta") process.stdout.write(String(data.text));
+      else if (event === "tool_call") {
+        const call = data as unknown as ToolCall;
+        const result = run(call.name, call.arguments);
+        results.set(call.id, result);
+        process.stdout.write(`\n      -> ran ${call.name}(${JSON.stringify(call.arguments)}) = ${result}   (before the turn ended)`);
+      }
       else if (event === "done") done = data as unknown as Done;
       else if (event === "error") return `\nstream interrupted: ${data.detail}`;
     }
@@ -83,12 +93,12 @@ async function main(): Promise<string | undefined> {
 
     if (done.stopReason !== "tool_use" || !done.toolCalls?.length) return undefined;
 
-    // Tool calls arrive on `done`, not mid-stream: the model decides what to call
-    // only once it has finished, and we need the whole call to run it.
     messages.push({ role: "assistant", content: done.text, toolCalls: done.toolCalls });
     for (const call of done.toolCalls) {
-      const result = run(call.name, call.arguments);
-      console.log(`      -> ran ${call.name}(${JSON.stringify(call.arguments)}) = ${result}`);
+      // Already ran on its tool_call event; a cache hit replays the call only
+      // on done, so run it here if we have not.
+      const result = results.get(call.id) ?? run(call.name, call.arguments);
+      if (!results.has(call.id)) console.log(`      -> ran ${call.name}(${JSON.stringify(call.arguments)}) = ${result}`);
       messages.push({ role: "tool", toolCallId: call.id, content: result });
     }
     if (hops >= 5) return "step cap hit - an agent loop always needs one";

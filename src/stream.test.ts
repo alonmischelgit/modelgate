@@ -149,3 +149,24 @@ test("streams never lead single-flight, but do follow a one-shot leader", async 
   assert.equal(b.done!.coalesced, true);
   assert.equal(b.done!.text, a.body.text);
 });
+
+// --- Tool calls mid-stream ----------------------------------------------------
+
+test("a tool call arrives as its own event BEFORE done, complete and actionable; done repeats it", async () => {
+  const g = await gateway();
+  const tools = [{ name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } }];
+  const out = await handleChatStream("t", ask("What's the weather in Haifa?", { tools }), g);
+  assert.ok("events" in out);
+  const events: SseEvent[] = [];
+  for await (const ev of out.events) events.push(ev);
+  const names = events.map((e) => e.event);
+  const callIdx = names.indexOf("tool_call");
+  const doneIdx = names.indexOf("done");
+  assert.ok(callIdx >= 0 && doneIdx > callIdx, `tool_call must precede done: ${names.join(",")}`);
+  const call = events[callIdx].data as { id: string; name: string; arguments: Record<string, unknown> };
+  assert.equal(call.name, "get_weather");
+  assert.deepEqual(call.arguments, { city: "Haifa" }, "complete arguments, not a fragment");
+  const done = events[doneIdx].data as { toolCalls: unknown[]; stopReason: string };
+  assert.equal(done.stopReason, "tool_use");
+  assert.deepEqual(done.toolCalls, [call], "done carries the same call, so clients that ignore tool_call are unaffected");
+});

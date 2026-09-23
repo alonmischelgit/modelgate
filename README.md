@@ -14,7 +14,7 @@ from scratch to own the failure modes, not to compete with them.
 ```
 npm install
 npm start          # http://localhost:3200  (no API key, no Redis, no Docker needed)
-npm test           # 115 tests, offline, ~1s
+npm test           # 117 tests, offline, ~1s
 npm run demo       # scripted proof of every behaviour, in a second terminal
 npm run agent      # a 30-line agent using the gateway: tool loop, one request id across hops
 npm run agent:stream   # the same agent, streaming tokens as they arrive
@@ -165,6 +165,16 @@ inter-token idle timeout replaces the whole-request one. The stream's answer is
 cached on completion; a cached answer is replayed as one delta. Same loop for
 the agent either way: [`examples/streaming-agent.ts`](examples/streaming-agent.ts).
 
+**Tool calls stream too — complete, the moment each one is ready.** A
+`tool_call` event carries `{id, name, arguments}` as soon as the provider has
+finished that call, before the turn ends, so an agent can start running it
+while the model is still producing the next one. Not as JSON fragments: a
+caller cannot act on half an argument object, so forwarding fragments is
+complexity without a decision the client can make. Gemini sends each call as
+one part; Claude streams `input_json_delta` fragments and the adapter assembles
+them and emits once, on `content_block_stop`. `done` repeats the full list, so
+a client that ignores `tool_call` events is unaffected.
+
 **503, not 500, when every provider fails.** 500 means *we* are broken. An
 upstream dependency failure is a different pager. Every error is JSON with a
 stable `error` code, a `requestId`, and — where it makes sense — a `Retry-After`
@@ -273,7 +283,7 @@ In order:
 
 1. **Auth** — real API keys mapped to tenant records; today the key *is* the tenant (required, but not verified) so multi-tenancy is testable without a user system.
 2. **Concurrency limits** per tenant and per provider (bulkheading). LLM calls are long-lived, so in-flight matters more than rate.
-3. **Tool calls mid-stream** — today tool calls arrive on the `done` event, because the loop needs the whole call to run it. Forwarding partial arguments as they stream (as the provider SDKs can) would let an agent start a tool before the model finishes.
+3. **Honour the provider's `Retry-After`** on 429s — backoff is tuned for blips, not for a rate limit that names its own wait — and classify quota-exhausted 429s as non-retryable.
 4. **Traces to OTel, the ledger to a warehouse** — `/metrics` is already scrapeable; `trace[]` becomes spans, `usage.jsonl` becomes a table.
 5. **Cost-aware routing** — the easy 80% (classification, extraction) to a small model, escalate the rest. The registry is a typed table and `routePlan()` is a pure function precisely so this is an addition, not surgery.
 6. **Redis Cluster / tenant sharding** — Redis is the next bottleneck. The per-concern failure policy is already in place (rate limit and cache fail *open*, budget fails *closed* — see the header of `pipeline.ts`); what's missing is making the store itself not a single point of failure.

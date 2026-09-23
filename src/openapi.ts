@@ -711,9 +711,11 @@ export function openapiSpec() {
               default: false,
               description:
                 "Answer as server-sent events (`Accept: text/event-stream` does the same). " +
-                "Events: `delta` `{text}` as tokens arrive, then one `done` whose data is exactly the " +
-                "one-shot response body (usage, cost, servedBy, toolCalls, trace), or one `error` if the " +
-                "provider failed **after** the first byte. Anything decided before the first byte - a 429, " +
+                "Events: `delta` `{text}` as tokens arrive; `tool_call` `{id, name, arguments}` the moment " +
+                "each call is **complete** (not JSON fragments - a caller cannot act on half an argument " +
+                "object), so an agent can start running it before the turn ends; then one `done` whose data " +
+                "is exactly the one-shot response body (usage, cost, servedBy, the full toolCalls list, trace), " +
+                "or one `error` if the provider failed **after** the first byte. Anything decided before the first byte - a 429, " +
                 "a 400, a cache hit - is still plain JSON with a real status. Retries, breaker and failover " +
                 "apply only until the first byte: once you have half an answer from model A, nobody can " +
                 "silently hand you the rest from model B. Not part of the cache key; a stream's answer is " +

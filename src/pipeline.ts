@@ -46,7 +46,7 @@
 import crypto from "node:crypto";
 import { Store } from "./store/index.js";
 import { config } from "./config.js";
-import { Provider, ChatRequest, ChatResponse, estimateTokens } from "./providers/types.js";
+import { Provider, ChatRequest, ChatResponse, ToolCall, estimateTokens } from "./providers/types.js";
 import { routePlan, costUsd, MODELS, RouteStep } from "./providers/registry.js";
 import { policyFor, TenantPolicy } from "./tenants.js";
 import {
@@ -70,6 +70,7 @@ export interface GatewayDeps {
 /** One server-sent event on the streaming path. */
 export type SseEvent =
   | { event: "delta"; data: { text: string } }
+  | { event: "tool_call"; data: ToolCall }
   | { event: "done"; data: Record<string, unknown> }
   | { event: "error"; data: Record<string, unknown> };
 
@@ -447,6 +448,10 @@ export async function handleChatStream(
       for await (const ev of opened.events) {
         if (ev.type === "delta") {
           yield { event: "delta", data: { text: ev.text } };
+        } else if (ev.type === "tool_call") {
+          // Complete, actionable, and before the turn ends - the agent can
+          // start running it while the model is still producing the next one.
+          yield { event: "tool_call", data: ev.call };
         } else {
           const result = await settled(c, ev.response, opened);
           yield { event: "done", data: { ...result.body, trace: result.trace } };

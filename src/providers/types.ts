@@ -63,12 +63,17 @@ export interface ChatRequest {
 }
 
 /**
- * What a streaming provider yields: text as it arrives, then exactly one
- * `final` carrying the complete response - the same ChatResponse a non-stream
- * call returns, so accounting, caching and the response body reuse one path.
+ * What a streaming provider yields: text as it arrives, each tool call the
+ * moment it is COMPLETE (not as JSON fragments - a caller cannot act on half
+ * an argument object), then exactly one `final` carrying the complete
+ * response - the same ChatResponse a non-stream call returns, so accounting,
+ * caching and the response body reuse one path. `final.toolCalls` repeats
+ * every call already emitted, so a client that ignores `tool_call` events is
+ * unaffected.
  */
 export type StreamEvent =
   | { type: "delta"; text: string }
+  | { type: "tool_call"; call: ToolCall }
   | { type: "final"; response: ChatResponse };
 
 export interface Usage {

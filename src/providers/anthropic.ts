@@ -71,14 +71,29 @@ export class AnthropicProvider implements Provider {
     return this.parse(await this.client.messages.create(this.params(req, model)), model);
   }
 
-  /** Text deltas as they arrive; the SDK assembles the final message for us. */
+  /**
+   * Text deltas as they arrive. Claude streams a tool call as a `tool_use`
+   * block whose input arrives as JSON fragments; we assemble the fragments and
+   * emit the call once, complete, when its block stops - fragments are not
+   * something a caller can act on. The SDK assembles the final message for us.
+   */
   async *stream(req: ChatRequest): AsyncIterable<StreamEvent> {
     if (!this.client) throw new Error("anthropic: ANTHROPIC_API_KEY not configured");
     const model = req.model ?? this.defaultModel;
     const s = this.client.messages.stream(this.params(req, model));
+    const open = new Map<number, { id: string; name: string; json: string }>();   // by content block index
     for await (const ev of s) {
-      if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
-        yield { type: "delta", text: ev.delta.text };
+      if (ev.type === "content_block_start" && ev.content_block.type === "tool_use") {
+        open.set(ev.index, { id: ev.content_block.id, name: ev.content_block.name, json: "" });
+      } else if (ev.type === "content_block_delta") {
+        if (ev.delta.type === "text_delta") yield { type: "delta", text: ev.delta.text };
+        else if (ev.delta.type === "input_json_delta") { const b = open.get(ev.index); if (b) b.json += ev.delta.partial_json; }
+      } else if (ev.type === "content_block_stop") {
+        const b = open.get(ev.index);
+        if (b) {
+          open.delete(ev.index);
+          yield { type: "tool_call", call: { id: b.id, name: b.name, arguments: b.json ? JSON.parse(b.json) as Record<string, unknown> : {} } };
+        }
       }
     }
     yield { type: "final", response: this.parse(await s.finalMessage(), model) };
